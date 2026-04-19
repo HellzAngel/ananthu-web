@@ -545,21 +545,22 @@
   });
 }());
 
-// ── AMBIENT AUDIO ──────────────────────────────────────────────────────────────
+// ── AMBIENT AUDIO — Lo-fi Chill ────────────────────────────────────────────────
 
 (function ambientAudio() {
-  var ctx = null;
+  var ctx        = null;
   var masterGain = null;
   var reverbNode = null;
-  var arpTimer   = null;
+  var beatTimer  = null;
+  var chordTimer = null;
   var playing    = false;
   var btn     = document.getElementById('audio-toggle');
   var iconOff = document.getElementById('audio-icon-off');
   var iconOn  = document.getElementById('audio-icon-on');
 
-  // Build a simple convolution reverb from white noise impulse
+  // Convolution reverb from white-noise impulse
   function makeReverb(duration, decay) {
-    var len    = ctx.sampleRate * duration;
+    var len     = ctx.sampleRate * duration;
     var impulse = ctx.createBuffer(2, len, ctx.sampleRate);
     for (var ch = 0; ch < 2; ch++) {
       var d = impulse.getChannelData(ch);
@@ -577,107 +578,192 @@
     masterGain = ctx.createGain();
     masterGain.gain.setValueAtTime(0, ctx.currentTime);
 
-    // Reverb → master
-    reverbNode = makeReverb(4, 3.5);
+    // Warm reverb → master
+    reverbNode = makeReverb(2.5, 2.0);
     reverbNode.connect(masterGain);
     masterGain.connect(ctx.destination);
 
-    // ── 1. Warm pad — slow chord (Am-ish: A2 C3 E3 G3) ──────────────────────
-    var padFreqs = [110, 130.81, 164.81, 196];
-    padFreqs.forEach(function(f, idx) {
+    // Lo-fi warmth: roll off harsh highs
+    var warmFilter = ctx.createBiquadFilter();
+    warmFilter.type = 'lowpass';
+    warmFilter.frequency.value = 3500;
+    warmFilter.Q.value = 0.7;
+    warmFilter.connect(reverbNode);
+
+    // ── 1. Chord pad — Cmaj7 → Am7 → Fmaj7 → G7 ─────────────────────────────
+    var chords = [
+      [261.63, 329.63, 392.00, 493.88],   // Cmaj7: C4 E4 G4 B4
+      [220.00, 261.63, 329.63, 392.00],   // Am7:   A3 C4 E4 G4
+      [174.61, 220.00, 261.63, 329.63],   // Fmaj7: F3 A3 C4 E4
+      [196.00, 246.94, 293.66, 349.23],   // G7:    G3 B3 D4 F4
+    ];
+    var bassRoots = [130.81, 110.00, 87.31, 98.00];  // C3 A2 F2 G2
+
+    var padOscs = [];
+    chords[0].forEach(function(f, idx) {
       var osc  = ctx.createOscillator();
       var gain = ctx.createGain();
-      osc.type = idx % 2 === 0 ? 'sine' : 'triangle';
+      osc.type = idx % 2 === 0 ? 'triangle' : 'sine';
       osc.frequency.value = f;
-      osc.detune.value = (idx - 1.5) * 6;   // tiny per-note detune for width
-      gain.gain.value = 0.10;
+      osc.detune.value = (idx - 1.5) * 10;   // vinyl-style detuning
+      gain.gain.value = 0.07;
       osc.connect(gain);
-      gain.connect(reverbNode);
+      gain.connect(warmFilter);
       osc.start();
+      padOscs.push({ osc: osc, gain: gain });
     });
 
-    // ── 2. Sub bass pulse at 55 Hz ───────────────────────────────────────────
-    var bass = ctx.createOscillator();
+    // ── 2. Bass oscillator ────────────────────────────────────────────────────
+    var bass  = ctx.createOscillator();
     var bassG = ctx.createGain();
     bass.type = 'sine';
-    bass.frequency.value = 55;
-    bassG.gain.value = 0.22;
+    bass.frequency.value = bassRoots[0];
+    bassG.gain.value = 0.20;
     bass.connect(bassG);
-    bassG.connect(masterGain);  // bass direct (no reverb mud)
+    bassG.connect(masterGain);   // bass direct — no reverb mud
     bass.start();
 
-    // ── 3. High crystal shimmer — pentatonic notes ───────────────────────────
-    // Notes: A4 C5 D5 E5 G5 A5 (pentatonic)
-    var shimmerFreqs = [440, 523.25, 587.33, 659.25, 783.99, 880];
-    var shimmerOscs  = shimmerFreqs.map(function(f) {
+    // Cycle chords every 8 seconds
+    var chordIdx = 0;
+    function nextChord() {
+      chordIdx = (chordIdx + 1) % chords.length;
+      var now  = ctx.currentTime;
+      chords[chordIdx].forEach(function(f, i) {
+        padOscs[i].osc.frequency.linearRampToValueAtTime(f, now + 0.8);
+      });
+      bass.frequency.linearRampToValueAtTime(bassRoots[chordIdx], now + 0.8);
+      chordTimer = setTimeout(nextChord, 8000);
+    }
+    chordTimer = setTimeout(nextChord, 8000);
+
+    // ── 3. Vinyl crackle ──────────────────────────────────────────────────────
+    var cSize = ctx.sampleRate * 2;
+    var cBuf  = ctx.createBuffer(1, cSize, ctx.sampleRate);
+    var cd    = cBuf.getChannelData(0);
+    for (var i = 0; i < cSize; i++) {
+      cd[i] = Math.random() < 0.0003
+        ? (Math.random() * 2 - 1) * 0.35
+        : (Math.random() * 2 - 1) * 0.002;
+    }
+    var cSrc  = ctx.createBufferSource();
+    cSrc.buffer = cBuf; cSrc.loop = true;
+    var cFilt = ctx.createBiquadFilter();
+    cFilt.type = 'bandpass'; cFilt.frequency.value = 1500; cFilt.Q.value = 1.0;
+    var cGain = ctx.createGain(); cGain.gain.value = 0.035;
+    cSrc.connect(cFilt); cFilt.connect(cGain); cGain.connect(masterGain);
+    cSrc.start();
+
+    // ── 4. Melody oscillators — C major pentatonic (C5 D5 E5 G5 A5) ──────────
+    var melFreqs = [523.25, 587.33, 659.25, 783.99, 880.00];
+    var melOscs  = melFreqs.map(function(f) {
       var o = ctx.createOscillator();
       var g = ctx.createGain();
-      o.type = 'sine';
+      o.type = 'triangle';
       o.frequency.value = f;
-      g.gain.value = 0;   // starts silent — arpeggio triggers it
-      o.connect(g);
-      g.connect(reverbNode);
+      o.detune.value = 8;   // slightly flat for warmth
+      g.gain.value = 0;
+      o.connect(g); g.connect(warmFilter);
       o.start();
       return { osc: o, gain: g };
     });
 
-    // ── 4. Arpeggio sequencer ────────────────────────────────────────────────
-    var arpStep = 0;
-    var arpPattern = [0, 2, 4, 3, 1, 5, 4, 2];  // index into shimmerOscs
-    function arpTick() {
-      var idx  = arpPattern[arpStep % arpPattern.length];
-      var node = shimmerOscs[idx];
-      var now  = ctx.currentTime;
-      node.gain.gain.cancelScheduledValues(now);
-      node.gain.gain.setValueAtTime(0, now);
-      node.gain.gain.linearRampToValueAtTime(0.06, now + 0.05);
-      node.gain.gain.exponentialRampToValueAtTime(0.001, now + 1.8);
-      arpStep++;
-      var interval = [900, 1100, 700, 1300, 800, 1050, 950, 1200][arpStep % 8];
-      arpTimer = setTimeout(arpTick, interval);
+    // ── 5. Lo-fi beat (80 BPM, swung 16th-note feel) ─────────────────────────
+    var beat       = 60 / 80;                          // 0.75 s per beat
+    var melPattern = [0, 2, 4, 2, 3, 1, 4, 3, 0, 4, 2, 3];
+    var melStep    = 0;
+
+    function playKick(t) {
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(150, t);
+      o.frequency.exponentialRampToValueAtTime(40, t + 0.1);
+      g.gain.setValueAtTime(0.65, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+      o.connect(g); g.connect(masterGain);
+      o.start(t); o.stop(t + 0.25);
     }
-    arpTick();
 
-    // ── 5. Slow filter sweep on reverb input ─────────────────────────────────
-    var lpFilter = ctx.createBiquadFilter();
-    lpFilter.type = 'lowpass';
-    lpFilter.frequency.value = 800;
-    lpFilter.Q.value = 1.2;
-    // LFO modulates cutoff 400–2000 Hz over ~20 s
-    var sweepLFO = ctx.createOscillator();
-    var sweepAmt = ctx.createGain();
-    sweepLFO.frequency.value = 0.05;
-    sweepAmt.gain.value = 600;
-    sweepLFO.connect(sweepAmt);
-    sweepAmt.connect(lpFilter.frequency);
-    sweepLFO.start();
+    function playHihat(t, open) {
+      var sz  = Math.floor(ctx.sampleRate * (open ? 0.22 : 0.04));
+      var buf = ctx.createBuffer(1, sz, ctx.sampleRate);
+      var bd  = buf.getChannelData(0);
+      for (var j = 0; j < sz; j++) bd[j] = Math.random() * 2 - 1;
+      var src = ctx.createBufferSource(); src.buffer = buf;
+      var f   = ctx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 9000;
+      var g   = ctx.createGain();
+      g.gain.setValueAtTime(open ? 0.07 : 0.04, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + (open ? 0.18 : 0.035));
+      src.connect(f); f.connect(g); g.connect(masterGain);
+      src.start(t);
+    }
 
-    // ── 6. Soft noise breath ─────────────────────────────────────────────────
-    var bufSize    = ctx.sampleRate * 3;
-    var noiseBuf   = ctx.createBuffer(1, bufSize, ctx.sampleRate);
-    var nd         = noiseBuf.getChannelData(0);
-    for (var i = 0; i < bufSize; i++) nd[i] = Math.random() * 2 - 1;
-    var noiseSrc   = ctx.createBufferSource();
-    noiseSrc.buffer = noiseBuf;
-    noiseSrc.loop   = true;
-    var noiseFilter = ctx.createBiquadFilter();
-    noiseFilter.type = 'highpass';
-    noiseFilter.frequency.value = 3000;
-    var noiseG = ctx.createGain();
-    noiseG.gain.value = 0.018;
-    noiseSrc.connect(noiseFilter);
-    noiseFilter.connect(noiseG);
-    noiseG.connect(reverbNode);
-    noiseSrc.start();
+    function playSnare(t) {
+      var o = ctx.createOscillator(), og = ctx.createGain();
+      o.type = 'triangle'; o.frequency.value = 180;
+      og.gain.setValueAtTime(0.25, t);
+      og.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+      o.connect(og); og.connect(masterGain);
+      o.start(t); o.stop(t + 0.14);
+      var nb  = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.1), ctx.sampleRate);
+      var nd  = nb.getChannelData(0);
+      for (var j = 0; j < nd.length; j++) nd[j] = Math.random() * 2 - 1;
+      var ns  = ctx.createBufferSource(); ns.buffer = nb;
+      var nf  = ctx.createBiquadFilter(); nf.type = 'bandpass'; nf.frequency.value = 3000;
+      var ng  = ctx.createGain();
+      ng.gain.setValueAtTime(0.18, t);
+      ng.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+      ns.connect(nf); nf.connect(ng); ng.connect(masterGain);
+      ns.start(t);
+    }
 
-    // Breathe the master volume slowly
-    var breathLFO  = ctx.createOscillator();
-    var breathGain = ctx.createGain();
-    breathLFO.frequency.value = 0.06;
-    breathGain.gain.value = 0.05;
-    breathLFO.connect(breathGain);
-    breathGain.connect(masterGain.gain);
-    breathLFO.start();
+    function trigMelody(t, offset) {
+      var idx = melPattern[(melStep + offset) % melPattern.length];
+      var mn  = melOscs[idx];
+      mn.gain.gain.cancelScheduledValues(t);
+      mn.gain.gain.setValueAtTime(0, t);
+      mn.gain.gain.linearRampToValueAtTime(0.04, t + 0.04);
+      mn.gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+    }
+
+    function beatLoop() {
+      var now = ctx.currentTime + 0.05;   // small lookahead
+      // Beat 1 — kick + closed hat
+      playKick(now);
+      playHihat(now, false);
+      // Swung 16th after beat 1 — melody note
+      playHihat(now + beat * 0.55, false);
+      trigMelody(now + beat * 0.55, 0);
+      // Beat 2 — closed hat
+      playHihat(now + beat, false);
+      // Beat 2.5 — snare
+      playSnare(now + beat * 1.5);
+      playHihat(now + beat * 1.5, false);
+      trigMelody(now + beat * 1.5, 1);
+      // Beat 3 — kick + closed hat
+      playKick(now + beat * 2);
+      playHihat(now + beat * 2, false);
+      // Swung 16th after beat 3 — melody note
+      playHihat(now + beat * 2.55, false);
+      trigMelody(now + beat * 2.55, 2);
+      // Beat 4 — closed hat
+      playHihat(now + beat * 3, false);
+      // Beat 4.5 — snare + open hat
+      playSnare(now + beat * 3.5);
+      playHihat(now + beat * 3.5, false);
+      playHihat(now + beat * 3.75, true);
+      trigMelody(now + beat * 3.5, 3);
+
+      melStep   = (melStep + 4) % melPattern.length;
+      beatTimer = setTimeout(beatLoop, beat * 4 * 1000);
+    }
+    beatLoop();
+
+    // Gentle master breath (very subtle)
+    var bLFO = ctx.createOscillator(), bG = ctx.createGain();
+    bLFO.frequency.value = 0.04;
+    bG.gain.value = 0.03;
+    bLFO.connect(bG); bG.connect(masterGain.gain);
+    bLFO.start();
   }
 
   function fadeIn() {
@@ -690,7 +776,8 @@
     masterGain.gain.cancelScheduledValues(ctx.currentTime);
     masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
     masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 2);
-    if (arpTimer) { clearTimeout(arpTimer); arpTimer = null; }
+    if (beatTimer)  { clearTimeout(beatTimer);  beatTimer  = null; }
+    if (chordTimer) { clearTimeout(chordTimer); chordTimer = null; }
   }
 
   function setUI(on) {
